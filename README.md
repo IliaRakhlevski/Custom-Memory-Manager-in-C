@@ -1,4 +1,3 @@
-README.md
 
 # Custom Memory Manager in C
 
