@@ -1,9 +1,18 @@
+#include <stddef.h>
+#include <stdalign.h>
 #include "memory_manager.h"
 
 
-#define CHECK_RET if(ret) return ret;  
+#define CHECK_RET if(ret) return ret;
 
-static size_t alignment_size = sizeof(void*);
+/* payload alignment: suitable for any standard data type */
+#define ALIGNMENT ((size_t)alignof(mm_max_align_t))
+
+/* header size rounded up to the alignment, so the payload that follows a header is aligned too */
+#define HEADER_SIZE ((sizeof(header) + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT)
+
+/* the smallest valid block: a header and one aligned payload unit */
+#define MIN_BLOCK_SIZE (HEADER_SIZE + ALIGNMENT)
 
 static void* memory_block_aligned = NULL;
 
@@ -11,13 +20,24 @@ static uintptr_t memory_block_end_addr = 0;
 
 static bool memory_block_init = false;
 
-static size_t min_block_size = 0;
 
+/* checks that the header of the block that starts at block_st is consistent:
+   the block is not smaller than the minimal block and does not extend beyond the managed memory.
+   Every function that walks the heap uses it, so a corrupted header stops the walk
+   instead of causing an endless loop or an access outside the managed memory. */
+static bool is_valid_block(uintptr_t block_st)
+{
+	const header* head = (const header*)block_st;
 
-/* print the managed memory state 
-   debug helper: prints block list (header address, size, free/busy) 
-   assumes heap is not corrupted */
-ret_code_t print_memory()
+	if (memory_block_end_addr - block_st < MIN_BLOCK_SIZE)
+		return false;
+
+	return head->block_size >= MIN_BLOCK_SIZE && head->block_size <= memory_block_end_addr - block_st;
+}
+
+/* print the managed memory state
+   debug helper: prints block list (header address, size, free/busy) */
+ret_code_t print_memory(void)
 {
 	uintptr_t block_st;
 	header* head = NULL;
@@ -28,7 +48,7 @@ ret_code_t print_memory()
 	{
 		printf("Memory is not initialized\n\n");
 		return RET_CODE_SUCCESS;
-	}	
+	}
 
 	printf("Start of the aligned memory: %" PRIuPTR "\n", (uintptr_t)memory_block_aligned);
 	printf("End of the aligned memory: %" PRIuPTR "\n", memory_block_end_addr);
@@ -36,8 +56,14 @@ ret_code_t print_memory()
 
 	block_st = (uintptr_t)memory_block_aligned;
 
-	while (block_st + sizeof(header) <= memory_block_end_addr)
+	while (block_st < memory_block_end_addr)
 	{
+		if (!is_valid_block(block_st))
+		{
+			printf("Corrupted block header at address %" PRIuPTR "\n\n", block_st);
+			return RET_CODE_HEAP_CORRUPTED;
+		}
+
 		head = (header*)block_st;
 
 		printf("Block: type - %s, size - %zu, address - %" PRIuPTR "\n", head->is_free ? "free" : "busy", head->block_size, block_st);
@@ -51,63 +77,67 @@ ret_code_t print_memory()
 }
 
 /* searching for the nearest align-up (ceil) address of the given pointer */
-static ret_code_t find_nearest_aligned_address(void* mem_block, uintptr_t* aligned_addres)
+static ret_code_t find_nearest_aligned_address(uintptr_t addr, uintptr_t end_addr, uintptr_t* aligned_addres)
 {
-	uintptr_t u_mem_block = (uintptr_t)mem_block;
-
-	uintptr_t al_mod = u_mem_block% alignment_size;
+	uintptr_t al_mod = addr % ALIGNMENT;
 
 	if (al_mod > 0)
-		u_mem_block += (alignment_size - al_mod);
+	{
+		/* the aligned address must not wrap around and must stay inside the given memory */
+		if (ALIGNMENT - al_mod > end_addr - addr)
+			return RET_CODE_ALIGNMENT_ERROR;
+		addr += (ALIGNMENT - al_mod);
+	}
 
-	/* returns ALIGNMENT_ERROR if aligned address goes beyond managed memory end */
-	if (u_mem_block > memory_block_end_addr)
-		return RET_CODE_ALIGNMENT_ERROR;
-
-	*aligned_addres = u_mem_block;
+	*aligned_addres = addr;
 
 	return RET_CODE_SUCCESS;
 }
 
-/* initializing the memory manager, by receiving a continuous memory block and its size */
+/* initializing the memory manager, by receiving a continuous memory block and its size.
+   The new state is computed in local variables and committed only on success,
+   so a failed call does not break an allocator that is already initialized. */
 ret_code_t my_malloc_init(void* mem_block, size_t mem_size)
 {
 	ret_code_t ret;
 	uintptr_t aligned_memory_block = 0;
+	uintptr_t start_addr, end_addr;
 
 
 	if (mem_block == NULL || mem_size == 0)
 		return RET_CODE_INPUT_ERROR;
 
+	start_addr = (uintptr_t)mem_block;
 
-	min_block_size = sizeof(header) + alignment_size;
+	/* the end address must not wrap around */
+	if (mem_size > UINTPTR_MAX - start_addr)
+		return RET_CODE_INPUT_ERROR;
 
-	memory_block_end_addr = (uintptr_t)mem_block + mem_size;
+	end_addr = start_addr + mem_size;
 
-	ret = find_nearest_aligned_address(mem_block, &aligned_memory_block);
+	ret = find_nearest_aligned_address(start_addr, end_addr, &aligned_memory_block);
 	CHECK_RET;
 
-	memory_block_aligned = (void*)aligned_memory_block;
-
-	if((memory_block_end_addr - aligned_memory_block) < min_block_size)
+	if((end_addr - aligned_memory_block) < MIN_BLOCK_SIZE)
 		return RET_CODE_MEM_SIZE_TOO_SMALL;
 
-	header* head = (header*)memory_block_aligned;
+	header* head = (header*)aligned_memory_block;
 	head->is_free = true;
-	head->block_size = memory_block_end_addr - aligned_memory_block;
+	head->block_size = end_addr - aligned_memory_block;
 
+	memory_block_aligned = (void*)aligned_memory_block;
+	memory_block_end_addr = end_addr;
 	memory_block_init = true;
 
 	return RET_CODE_SUCCESS;
 }
 
-/* receiving a request for memory allocation for a given size 
+/* receiving a request for memory allocation for a given size
    allocator may return a block larger than requested due to alignment / non-splittable remainder */
 ret_code_t my_malloc_alloc(size_t size, void** out_alloc_mem)
 {
 	uintptr_t block_st;
 	header* head, *ex_head;
-	ret_code_t ret, ret_code = RET_CODE_ALLOC_FAILED;
 
 	if (out_alloc_mem == NULL || size == 0)
 		return RET_CODE_INPUT_ERROR;
@@ -117,74 +147,77 @@ ret_code_t my_malloc_alloc(size_t size, void** out_alloc_mem)
 
 	block_st = (uintptr_t)memory_block_aligned;
 
-	while (block_st + sizeof(header) <= memory_block_end_addr)
+	while (block_st < memory_block_end_addr)
 	{
+		if (!is_valid_block(block_st))
+			return RET_CODE_HEAP_CORRUPTED;
+
 		head = (header*)block_st;
-		if (head->block_size < min_block_size)
-			return RET_CODE_ALLOC_FAILED;
 
-		if (!head->is_free) 
+		/* the size is compared with the free space of the block before any arithmetic on it:
+		   adding a huge size to an address would wrap around (e.g. size == SIZE_MAX - 7) */
+		if (head->is_free && size <= head->block_size - HEADER_SIZE)
 		{
-			block_st += head->block_size;
-		}
-		else
-		{
-			uintptr_t end_of_block_aligned;
-			uintptr_t end_of_block = block_st + sizeof(header) + size;
+			/* payload rounded up to the alignment; cannot overflow, because
+			   size is not larger than the block, and the block fits in the managed memory */
+			size_t aligned_payload_size = (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
+			size_t full_aligned_block_size = HEADER_SIZE + aligned_payload_size;
 
-			ret = find_nearest_aligned_address((void*)end_of_block, &end_of_block_aligned);
-			CHECK_RET;
-
-			size_t full_aligned_block_size = end_of_block_aligned - block_st;
-
-			if (full_aligned_block_size > head->block_size)
+			if (full_aligned_block_size <= head->block_size)
 			{
-				block_st += head->block_size;
-				continue;
+				size_t remains_free_block_size = head->block_size - full_aligned_block_size;
+
+				/* split only if the remainder can form a valid block */
+				if (remains_free_block_size >= MIN_BLOCK_SIZE)
+				{
+					ex_head = (header*)(block_st + full_aligned_block_size);
+					ex_head->is_free = true;
+					ex_head->block_size = remains_free_block_size;
+					head->block_size = full_aligned_block_size;
+				}
+
+				head->is_free = false;
+				*out_alloc_mem = (void*)(block_st + HEADER_SIZE);
+				return RET_CODE_SUCCESS;
 			}
-
-			size_t remains_free_block_size = head->block_size - full_aligned_block_size;
-
-			if (remains_free_block_size >= min_block_size)
-			{
-				ex_head = (header*)end_of_block_aligned;
-				ex_head->is_free = true;
-				ex_head->block_size = remains_free_block_size;
-				head->block_size = (size_t)ex_head - (size_t)head;
-			}		
-
-			head->is_free = false;
-			*out_alloc_mem = (void*)(block_st + sizeof(header));
-			ret_code = RET_CODE_SUCCESS;
-			break;
 		}
+
+		block_st += head->block_size;
 	}
 
-	return ret_code;
+	return RET_CODE_ALLOC_FAILED;
 }
 
-/* merging adjacent freed memory blocks 
+/* merging adjacent freed memory blocks
    keeps merging consecutive free blocks to the right (does not advance on merge) */
-static ret_code_t merge_freed_blocks()
+static ret_code_t merge_freed_blocks(void)
 {
-	uintptr_t block_st;
+	uintptr_t block_st, next_st;
 	header* head = NULL, *ex_head = NULL;
 
 	block_st = (uintptr_t)memory_block_aligned;
 
-	while (block_st + sizeof(header) <= memory_block_end_addr)
+	while (block_st < memory_block_end_addr)
 	{
+		if (!is_valid_block(block_st))
+			return RET_CODE_HEAP_CORRUPTED;
+
 		head = (header*)block_st;
-		if (head->is_free)
+		next_st = block_st + head->block_size;
+
+		if (head->is_free && next_st < memory_block_end_addr)
 		{
-			ex_head = (header * )((uintptr_t)head + head->block_size);
-			if (((uintptr_t)ex_head + sizeof(header) <= memory_block_end_addr) && (ex_head->is_free))
+			if (!is_valid_block(next_st))
+				return RET_CODE_HEAP_CORRUPTED;
+
+			ex_head = (header*)next_st;
+			if (ex_head->is_free)
 			{
 				head->block_size += ex_head->block_size;
 				continue;
 			}
 		}
-		block_st += head->block_size;
+		block_st = next_st;
 	}
 
 	return RET_CODE_SUCCESS;
@@ -203,12 +236,15 @@ static ret_code_t check_mem_ptr(void* mem_to_free, bool *valid)
 
 	block_st = (uintptr_t)memory_block_aligned;
 
-	while (block_st + sizeof(header) <= memory_block_end_addr)
+	while (block_st < memory_block_end_addr)
 	{
+		if (!is_valid_block(block_st))
+			return RET_CODE_HEAP_CORRUPTED;
+
 		head = (header*)block_st;
 		if (!head->is_free)
 		{
-			if ((uintptr_t)head + sizeof(header) == (uintptr_t)mem_to_free)
+			if (block_st + HEADER_SIZE == (uintptr_t)mem_to_free)
 			{
 				*valid = true;
 				break;
@@ -248,10 +284,8 @@ ret_code_t my_malloc_free(void* mem_to_free)
 	if (!valid)
 		return RET_CODE_INCORRECT_MEM_POINTER;
 
-	head = (header*)((uintptr_t)mem_to_free - sizeof(header));
+	head = (header*)(mem_free_addr - HEADER_SIZE);
 	head->is_free = true;
 
-	merge_freed_blocks();
-
-	return RET_CODE_SUCCESS;
+	return merge_freed_blocks();
 }
