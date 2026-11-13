@@ -1,0 +1,14 @@
+# Keep line endings consistent no matter who edits the files.
+#
+# Git stores LF inside the repository and checks the files out with the
+# native endings of the platform - CRLF on Windows, LF on Linux and macOS.
+# The Makefile must keep LF everywhere: make does not accept CRLF.
+
+* text=auto
+
+*.c     text
+*.h     text
+*.md    text
+*.yml   text
+*.txt   text
+Makefile text eol=lf
