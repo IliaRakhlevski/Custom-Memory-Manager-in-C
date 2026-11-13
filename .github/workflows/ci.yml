@@ -32,7 +32,7 @@ jobs:
             options: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure
         shell: bash
@@ -50,7 +50,7 @@ jobs:
     name: Linux Makefile (GCC, -Werror)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and test
         run: make test
       - name: Demo
