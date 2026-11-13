@@ -1,9 +1,10 @@
 ﻿#include "memory_manager.h"
 
 
-#define REQ_MEM_SIZE 120
+/* large enough for the demo with 16-byte alignment (GCC/Clang on x86-64) */
+#define REQ_MEM_SIZE 256
 
-int main() 
+int main(void)
 { 
     void* alloc_mem1 = NULL;
     void* alloc_mem2 = NULL;
