@@ -1,0 +1,57 @@
+# Build and test on every push, with three compilers and with sanitizers.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false        # one red job must not hide the others
+      matrix:
+        include:
+          - name: Linux GCC
+            os: ubuntu-latest
+            cc: gcc
+            options: ""
+          - name: Linux Clang
+            os: ubuntu-latest
+            cc: clang
+            options: ""
+          - name: Linux GCC + sanitizers
+            os: ubuntu-latest
+            cc: gcc
+            options: -DMM_SANITIZE=ON
+          - name: Windows MSVC
+            os: windows-latest
+            cc: ""
+            options: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.cc }}" ]; then export CC=${{ matrix.cc }}; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DMM_WERROR=ON ${{ matrix.options }}
+
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config Debug --output-on-failure
+
+  makefile:
+    name: Linux Makefile (GCC, -Werror)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: make test
+      - name: Demo
+        run: make memory_manager && ./memory_manager

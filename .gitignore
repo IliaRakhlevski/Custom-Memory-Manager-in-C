@@ -1,0 +1,9 @@
+# build output
+build/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+memory_manager
+test_memory_manager
